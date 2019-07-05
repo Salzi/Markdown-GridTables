@@ -62,8 +62,8 @@ class GridTableExtension(markdown.Extension):
                                       GridTableProcessor(md.parser),
                                       '<hashheader')
 
-def makeExtension(configs={}):
-    return GridTableExtension(configs=configs)
+def makeExtension(*args, **kwargs):
+    return GridTableExtension(*args, **kwargs)
 
 class GridTableCell(object):
     """
@@ -315,26 +315,7 @@ class GridTableRow(object):
         equal to the starting row plus the height.
         """
         return self._start_row + self._height
-    
-    @property
-    def start_col(self):
-        """
-        The column in the block at which this row starts. If a cell starts at
-        this row, that cell's start column is returned. Otherwise, the furthest
-        right connected cell's (starting from the left) end column is returned.
-        """
-        if len(self._cells) == 0:
-            return 0
-        left_cell = None
-        for cell in self._cells:
-            if cell.start_row == self.start_row:
-                return cell.start_col
-            if left_cell is None or left_cell.end_col == cell.start_col:
-                left_cell = cell
-            else:
-                break
-        return left_cell.end_col
-    
+
     @property
     def end_col(self):
         """
@@ -345,9 +326,14 @@ class GridTableRow(object):
             return 0
         return self._cells[-1].end_col
 
+    def get_cell_with_start_col(self, start_col):
+        for cell in self._cells:
+            if cell.start_col == start_col:
+                return cell
+
 class GridTable(object):
     """
-    A grid table in its entirity. The start row and start column should be 0, 0
+    A grid table in its entirety. The start row and start column should be 0, 0
     but can be set differently depending on the block. The width and height are
     how many characters wide and high the table is.
     """
@@ -368,8 +354,8 @@ class GridTable(object):
         for cell in self._rows[-2].get_all_cells_taller_than_this_row():
             cell.rowspan += 1
             self._rows[-1].add_cell(cell)
-        return self._rows[-1].start_row, self._rows[-1].start_col
-    
+        return self._rows[-1].start_row
+
     def add_cell(self, cell):
         """
         Adds a cell to the last row in the table.
@@ -477,6 +463,10 @@ class GridTableProcessor(markdown.blockprocessors.BlockProcessor):
     """
     _header_regex = r'\+=+(\+=+)*\+'
 
+    def __init__(self, parser):
+        super(GridTableProcessor, self).__init__(parser)
+        self.ignore_next_block = False
+
     def test(self, parent, block):
         """
         This function tests to see if the block of text passed in is a table or
@@ -485,7 +475,12 @@ class GridTableProcessor(markdown.blockprocessors.BlockProcessor):
         on both the top an bottom right corners, and has a '|' at the beginning
         and end of the first and last rows.
         """
+        if self.ignore_next_block:
+            self.ignore_next_block = False
+            return False
         rows = [r.strip() for r in block.split('\n')]
+        if len(set([len(r) for r in rows])) != 1: # all rows need the same length
+            return False
         return (len(rows) > 2 and rows[0][:2] == "+-" and rows[0][-2:] == "-+"
                 and rows[1][0] == '|' and rows[1][-1] == '|'
                 and rows[-2][0] == '|' and rows[-2][-1] == '|'
@@ -501,27 +496,14 @@ class GridTableProcessor(markdown.blockprocessors.BlockProcessor):
         Otherwise, it is rendered as a table with the appropriate row and
         column spans.
         """
-        orig_block = [r.strip() for r in blocks.pop(0).split('\n')]
-        body_block = orig_block[:]
+        body_block = [r.strip() for r in blocks[0].split('\n')]
         success, body = self._get_all_cells(body_block)
         if not success:
-            self._render_as_block(parent, '\n'.join(orig_block))
+            self.ignore_next_block = True
             return
+        del blocks[0]
         table = etree.SubElement(parent, 'table')
         self._render_rows(body, table)
-
-    def _render_as_block(self, parent, text):
-        """
-        Renders a table as a block of text instead of a table. This isn't done
-        correctly, since the serialized items are serialized again, but I'll
-        fix this later.
-        """
-        trans_table = [(' ', '&nbsp;'), ('<', '&lt;'), ('>', '&gt;'), ('&', '&amp;')]
-        for from_char, to_char in trans_table:
-            text = text.replace(from_char, to_char)
-        div = etree.SubElement(parent, 'div')
-        div.set('class', 'grid-table-error')
-        div.text = text
 
     def _header_exists(self, block):
         """
@@ -589,17 +571,20 @@ class GridTableProcessor(markdown.blockprocessors.BlockProcessor):
         header_exists, header_location, block = self._header_exists(block)
         table = GridTable(start_row, start_col, len(block)-1, len(block[0])-1, header_exists)
         while start_row < len(block)-1:
-            new_cell = self._scan_cell(block, start_row, start_col)
-            if new_cell is None or not table.add_cell(new_cell):
-                return False, table
-            if start_col + new_cell.width >= len(block[start_row])-1:
+            cell = table._rows[-1].get_cell_with_start_col(start_col)
+            if cell is None:
+                cell = self._scan_cell(block, start_row, start_col)
+                if cell is None or not table.add_cell(cell):
+                    return False, table
+            if start_col + cell.width >= len(block[start_row])-1:
                 is_header = header_exists and table._rows[-1].end_row < header_location
-                start_row, start_col = table.new_row(is_header=is_header)
+                start_row = table.new_row(is_header=is_header)
+                start_col = 0
             else:
-                start_col += new_cell.width
+                start_col += cell.width
         table.calculate_colspans()
         return True, table
-    
+
     def _scan_cell(self, block, start_row, start_col):
         """
         Starts scanning for a specific cell by checking the starting character
